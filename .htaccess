@@ -1,0 +1,23 @@
+# Disabilita listing directory
+Options -Indexes
+
+# Blocca accesso diretto a tutti i file/cartelle che iniziano con punto
+RedirectMatch 403 /\.
+
+# Blocca esplicitamente file di configurazione
+<FilesMatch "^\.?config\.php$|\.env$">
+    Require all denied
+</FilesMatch>
+
+# Default charset
+AddDefaultCharset UTF-8
+
+# Cache leggera per asset statici
+<FilesMatch "\.(js|css|json)$">
+    Header set Cache-Control "public, max-age=300"
+</FilesMatch>
+
+# CORS solo same-origin per le API
+<FilesMatch "\.php$">
+    Header set X-Content-Type-Options "nosniff"
+</FilesMatch>

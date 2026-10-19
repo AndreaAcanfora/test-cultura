@@ -1,0 +1,11 @@
+# Secrets — never commit
+.config.php
+.env
+
+# Runtime data (user-generated)
+data/leaderboard.json
+
+# OS / editor junk
+.DS_Store
+Thumbs.db
+*.log
