@@ -1,10 +1,14 @@
 <?php
 /**
  * Salva un risultato del quiz nello storico (data/leaderboard.json).
+ *
+ * Dal browser arriva solo il nome: punteggio, difficoltà e configurazione si
+ * calcolano dal quiz in sessione, con i punteggi assegnati da grade-batch.
  */
 
 define('ENTRY_POINT', true);
 require_once __DIR__ . '/../.config.php';
+require_once __DIR__ . '/_run.php';
 
 header('Content-Type: application/json; charset=utf-8');
 header('X-Content-Type-Options: nosniff');
@@ -33,21 +37,27 @@ if ($nome === '') {
     exit;
 }
 
-$score = isset($data['score']) ? (int)$data['score'] : -1;
-if ($score < 0 || $score > 100) {
-    http_response_code(400);
-    echo json_encode(['error' => 'Score non valido']);
-    exit;
+$run = run_get();
+if ($run === null) json_error(409, 'Nessun quiz da salvare.');
+if ($run['saved']) json_error(409, 'Risultato già salvato.');
+$served = $run['served'];
+if (count($served) === 0 || (count($served) < $run['cfg']['qcount'] && !$run['exhausted'])) {
+    json_error(409, 'Quiz non completato.');
 }
-
-$mode = isset($data['mode']) && in_array($data['mode'], ['adattiva', 'manuale'], true) ? $data['mode'] : 'manuale';
-$qcount = isset($data['qcount']) ? (int)$data['qcount'] : 0;
-if (!in_array($qcount, [20, 25, 30], true)) $qcount = 20;
-$spec = isset($data['spec']) ? max(20, min(100, (int)$data['spec'])) : 50;
-$avgDiff = isset($data['avgDifficulty']) ? (int)$data['avgDifficulty'] : 0;
-$levelReached = isset($data['levelReached']) ? (string)$data['levelReached'] : '';
-if (!in_array($levelReached, ['facile', 'medio', 'difficile', 'esperto', ''], true)) $levelReached = '';
-$answerType = isset($data['answerType']) && in_array($data['answerType'], ['multiple', 'open'], true) ? $data['answerType'] : 'multiple';
+$weighted = 0;
+$totalWeight = 0;
+foreach ($served as $id => $diff) {
+    if (!isset($run['graded'][$id])) json_error(409, 'Quiz non completato.');
+    $weighted += $run['graded'][$id]['score'] * $diff;
+    $totalWeight += $diff;
+}
+$score = $totalWeight > 0 ? (int)round($weighted / $totalWeight) : 0;
+$avgDiff = (int)round($totalWeight / count($served));
+$mode = $run['cfg']['mode'];
+$qcount = count($served);
+$spec = $run['cfg']['spec'];
+$levelReached = $mode === 'adattiva' ? $run['maxLevel'] : '';
+$answerType = $run['cfg']['answerType'];
 
 $entry = [
     'nome'       => $nome,
@@ -97,6 +107,9 @@ fwrite($fp, json_encode($list, JSON_UNESCAPED_UNICODE));
 fflush($fp);
 flock($fp, LOCK_UN);
 fclose($fp);
+
+$run['saved'] = true;
+run_put($run);
 
 // Calcola lbScore per ogni record e posizione in classifica.
 // Bonus: aperto = 1.0, scelta multipla = 0.8 (anche per record vecchi senza answerType)

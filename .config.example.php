@@ -17,8 +17,14 @@ if (!defined('ENTRY_POINT')) {
 define('ANTHROPIC_API_KEY', 'sk-ant-xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx');
 
 // Model used to grade open-ended answers.
-define('ANTHROPIC_MODEL', 'claude-haiku-4-5');
+define('ANTHROPIC_MODEL', 'claude-haiku-5-5');
 
 // Anthropic Messages API endpoint and version.
 define('ANTHROPIC_API_URL', 'https://api.anthropic.com/v1/messages');
 define('ANTHROPIC_API_VERSION', '2023-06-01');
+
+// Spending limits for open-ended grading (one API call per non-empty answer).
+// Defaults live in api/_run.php; uncomment to override.
+// define('RATE_LIMIT_OPEN_PER_IP_HOUR', 90);   // calls per IP per hour
+// define('RATE_LIMIT_OPEN_GLOBAL_DAY', 3000);  // calls per day, all users
+// define('RATE_LIMIT_RUNS_PER_IP_HOUR', 30);   // new quizzes per IP per hour

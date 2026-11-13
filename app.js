@@ -350,7 +350,7 @@ async function onNextPage(isLastPage) {
     try {
         scores = await gradeBatch(pageQs);
     } catch (e) {
-        alert('Errore durante la valutazione. Riprova.');
+        alert(e.message && !e.message.startsWith('grade-batch') ? e.message : 'Errore durante la valutazione. Riprova.');
         console.error(e);
         renderQuiz();
         return;
@@ -417,7 +417,10 @@ async function gradeBatch(pageQs) {
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ answerType: state.cfg.answerType, items }),
     });
-    if (!res.ok) throw new Error('grade-batch HTTP ' + res.status);
+    if (!res.ok) {
+        const err = await res.json().catch(() => null);
+        throw new Error((err && err.error) || 'grade-batch HTTP ' + res.status);
+    }
     const data = await res.json();
     if (!data || !Array.isArray(data.scores)) throw new Error('invalid response');
     return data.scores;
@@ -466,16 +469,8 @@ function renderResults() {
     if (!state.saved) {
         state.saved = true;
         saveState();
-        saveResult({
-            nome: state.cfg.nome,
-            score: finalScore,
-            mode: state.cfg.mode,
-            qcount: state.cfg.qcount,
-            spec: state.cfg.spec,
-            avgDifficulty: avgDiff,
-            levelReached: levelKey,
-            answerType: state.cfg.answerType,
-        }).then(res => {
+        // Il server ricalcola punteggio e statistiche dal quiz in sessione.
+        saveResult({ nome: state.cfg.nome }).then(res => {
             if (res && res.ok) {
                 showLeaderboard(res.leaderboard);
                 const myEntry = (res.leaderboard && res.leaderboard[res.mode] && res.leaderboard[res.mode].top5 || [])

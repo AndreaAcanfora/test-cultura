@@ -9,11 +9,16 @@
  * Risposta: { scores: [{score, motivazione, risposta_corretta, _id, partial?}, ...] }
  *
  * Per multiple: confronto stringa server-side, niente chiamate Anthropic.
- * Per open: chiamate parallele a Claude Haiku 4.5 via curl_multi.
+ * Per open: chiamate parallele a Claude Haiku via curl_multi, con limite di
+ * richieste per IP e tetto giornaliero globale (vedi _run.php).
+ *
+ * Valuta solo domande servite nel quiz in corso, una volta sola: i punteggi
+ * restano in sessione e sono la base del risultato salvato in classifica.
  */
 
 define('ENTRY_POINT', true);
 require_once __DIR__ . '/../.config.php';
+require_once __DIR__ . '/_run.php';
 
 set_time_limit(28);
 ignore_user_abort(true);
@@ -34,8 +39,12 @@ if (!is_array($data) || !isset($data['items']) || !is_array($data['items'])) {
     exit;
 }
 
-$answerType = isset($data['answerType']) && in_array($data['answerType'], ['multiple', 'open'], true) ? $data['answerType'] : 'multiple';
-$items = array_slice($data['items'], 0, 5);
+$run = run_get();
+if ($run === null || $run['saved']) {
+    json_error(409, 'Nessun quiz in corso.');
+}
+$answerType = $run['cfg']['answerType'];
+$items = array_slice(array_values($data['items']), 0, QUESTIONS_PER_PAGE);
 if (empty($items)) {
     echo json_encode(['scores' => []]);
     exit;
@@ -79,32 +88,55 @@ function normalize_answer($s) {
     return $s;
 }
 
-$scores = [];
+$scores = [];   // indice dell'item => risultato, poi ordinato
+$pending = [];  // indice => [_id, testo] da mandare al modello
 
-if ($answerType === 'multiple') {
-    // Valutazione locale, nessuna chiamata Anthropic
-    foreach ($items as $it) {
-        $id = isset($it['_id']) ? (string)$it['_id'] : '';
+foreach ($items as $idx => $it) {
+    $id = is_array($it) && isset($it['_id']) ? (string)$it['_id'] : '';
+    $entry = $byId[$id] ?? null;
+    if (!$entry || !isset($run['served'][$id])) {
+        $scores[$idx] = ['_id' => $id, 'score' => 0, 'motivazione' => 'Domanda non trovata.', 'risposta_corretta' => ''];
+        continue;
+    }
+    if (isset($run['graded'][$id])) {
+        // Già valutata: stesso risultato, nessuna nuova chiamata.
+        $scores[$idx] = $run['graded'][$id];
+        continue;
+    }
+    $corretta = (string)($entry['q']['risposta'] ?? '');
+    if ($answerType === 'multiple') {
         $scelta = isset($it['scelta_utente']) ? (string)$it['scelta_utente'] : '';
-        $entry = $byId[$id] ?? null;
-        if (!$entry) {
-            $scores[] = ['score' => 0, 'motivazione' => 'Domanda non trovata.', 'risposta_corretta' => '', '_id' => $id];
-            continue;
-        }
-        $corretta = (string)($entry['q']['risposta'] ?? '');
-        $ok = (normalize_answer($scelta) === normalize_answer($corretta));
-        $scores[] = [
+        $ok = ($scelta !== '' && normalize_answer($scelta) === normalize_answer($corretta));
+        $scores[$idx] = [
             '_id' => $id,
             'score' => $ok ? 100 : 0,
             'motivazione' => $ok ? 'Risposta corretta.' : ($scelta === '' ? 'Nessuna selezione.' : 'Risposta sbagliata.'),
             'risposta_corretta' => $corretta,
         ];
+        continue;
     }
-    echo json_encode(['scores' => $scores], JSON_UNESCAPED_UNICODE);
-    exit;
+    $testo = isset($it['testo_utente']) ? trim((string)$it['testo_utente']) : '';
+    if ($testo === '') {
+        // Risposta vuota: 0 senza spendere una chiamata.
+        $scores[$idx] = ['_id' => $id, 'score' => 0, 'motivazione' => 'Risposta assente.', 'risposta_corretta' => $corretta];
+        continue;
+    }
+    $pending[$idx] = ['_id' => $id, 'testo' => $testo];
 }
 
-// answerType === 'open' → chiamata Anthropic come prima
+if (!empty($pending)) {
+    $allowed = rate_limit_take([
+        ip_bucket('open', RATE_LIMIT_OPEN_PER_IP_HOUR, 3600),
+        ['open:global', RATE_LIMIT_OPEN_GLOBAL_DAY, 86400],
+    ], count($pending));
+    if (!$allowed) {
+        json_error(429, 'Limite di valutazioni raggiunto. Riprova più tardi.');
+    }
+}
+
+if (empty($pending)) goto respond;
+
+// Risposte aperte: chiamata Anthropic per ciascuna in $pending
 
 $systemPrompt = <<<'PROMPT'
 Sei un esaminatore italiano esperto e imparziale. Il tuo compito è valutare la risposta di uno studente confrontandola con la risposta corretta di riferimento per una specifica domanda.
@@ -218,10 +250,9 @@ $multiHandle = curl_multi_init();
 $curlHandles = [];
 $itemMeta = []; // [_id, risposta_corretta]
 
-foreach ($items as $idx => $item) {
-    $id = isset($item['_id']) ? (string)$item['_id'] : '';
-    $testo = isset($item['testo_utente']) ? trim((string)$item['testo_utente']) : '';
-    if ($testo === '') $testo = '(risposta vuota)';
+foreach ($pending as $idx => $item) {
+    $id = $item['_id'];
+    $testo = $item['testo'];
     $testo = mb_substr($testo, 0, 600, 'UTF-8');
     $entry = $byId[$id] ?? null;
     $domanda = $entry ? (string)$entry['q']['domanda'] : '';
@@ -238,8 +269,7 @@ foreach ($items as $idx => $item) {
 
     $payload = [
         'model' => ANTHROPIC_MODEL,
-        'max_tokens' => 150,
-        'temperature' => 0,
+        'max_tokens' => 300,
         'system' => [['type' => 'text', 'text' => $systemPrompt, 'cache_control' => ['type' => 'ephemeral']]],
         'tools' => $tools,
         'tool_choice' => ['type' => 'tool', 'name' => 'submit_grade'],
@@ -258,7 +288,6 @@ foreach ($items as $idx => $item) {
             'Content-Type: application/json',
             'x-api-key: ' . ANTHROPIC_API_KEY,
             'anthropic-version: ' . ANTHROPIC_API_VERSION,
-            'anthropic-beta: prompt-caching-2024-07-31',
         ],
     ]);
     $curlHandles[$idx] = $ch;
@@ -312,9 +341,19 @@ foreach ($curlHandles as $idx => $ch) {
         'risposta_corretta' => $itemMeta[$idx]['risposta_corretta'],
     ];
     if ($partial) $entry['partial'] = true;
-    $scores[] = $entry;
+    $scores[$idx] = $entry;
 }
 
 curl_multi_close($multiHandle);
 
-echo json_encode(['scores' => $scores], JSON_UNESCAPED_UNICODE);
+respond:
+foreach ($scores as $r) {
+    if ($r['_id'] !== '' && isset($run['served'][$r['_id']])) {
+        $run['graded'][$r['_id']] = $r;
+    }
+}
+run_update_level($run);
+run_put($run);
+
+ksort($scores);
+echo json_encode(['scores' => array_values($scores)], JSON_UNESCAPED_UNICODE);
