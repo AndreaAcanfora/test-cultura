@@ -6,6 +6,7 @@
 
 define('ENTRY_POINT', true);
 require_once __DIR__ . '/../.config.php';
+require_once __DIR__ . '/_run.php';
 
 header('Content-Type: application/json; charset=utf-8');
 header('X-Content-Type-Options: nosniff');
@@ -26,17 +27,45 @@ if (!is_array($payload)) {
 }
 
 $cfg = isset($payload['cfg']) && is_array($payload['cfg']) ? $payload['cfg'] : [];
-$seenIds = isset($payload['seenIds']) && is_array($payload['seenIds']) ? $payload['seenIds'] : [];
-$currentLevel = isset($payload['currentLevel']) ? (string)$payload['currentLevel'] : '';
+$clientSeen = isset($payload['seenIds']) && is_array($payload['seenIds']) ? $payload['seenIds'] : [];
 
-// Validazione config
-$mode = isset($cfg['mode']) && in_array($cfg['mode'], ['adattiva', 'manuale'], true) ? $cfg['mode'] : 'adattiva';
-$spec = isset($cfg['spec']) ? max(20, min(100, (int)$cfg['spec'])) : 50;
-$excluded = isset($cfg['excluded']) && is_array($cfg['excluded']) ? array_values(array_filter($cfg['excluded'], 'is_string')) : [];
-$answerType = isset($cfg['answerType']) && in_array($cfg['answerType'], ['multiple', 'open'], true) ? $cfg['answerType'] : 'multiple';
-$selectedRanges = isset($cfg['selectedRanges']) && is_array($cfg['selectedRanges'])
-    ? array_values(array_filter($cfg['selectedRanges'], function ($r) { return in_array($r, ['facile','medio','difficile','esperto'], true); }))
-    : [];
+$run = run_get();
+
+if (empty($clientSeen) || $run === null || $run['saved']) {
+    // Nuovo quiz: la configurazione viene fissata qui e non cambia più.
+    if (!rate_limit_take([ip_bucket('runs', RATE_LIMIT_RUNS_PER_IP_HOUR, 3600)])) {
+        json_error(429, 'Troppi quiz avviati. Riprova tra un po’.');
+    }
+    $qcount = isset($cfg['qcount']) ? (int)$cfg['qcount'] : 20;
+    $run = run_new([
+        'mode' => isset($cfg['mode']) && in_array($cfg['mode'], ['adattiva', 'manuale'], true) ? $cfg['mode'] : 'adattiva',
+        'spec' => isset($cfg['spec']) ? max(20, min(100, (int)$cfg['spec'])) : 50,
+        'excluded' => isset($cfg['excluded']) && is_array($cfg['excluded']) ? array_slice(array_values(array_filter($cfg['excluded'], 'is_string')), 0, 3) : [],
+        'answerType' => isset($cfg['answerType']) && in_array($cfg['answerType'], ['multiple', 'open'], true) ? $cfg['answerType'] : 'multiple',
+        'qcount' => in_array($qcount, [20, 25, 30], true) ? $qcount : 20,
+        'selectedRanges' => isset($cfg['selectedRanges']) && is_array($cfg['selectedRanges'])
+            ? array_values(array_unique(array_filter($cfg['selectedRanges'], function ($r) { return in_array($r, LEVEL_ORDER, true); })))
+            : [],
+    ]);
+} else {
+    // Quiz in corso: la pagina precedente deve essere stata valutata.
+    $lastPage = end($run['pages']) ?: [];
+    foreach ($lastPage as $id) {
+        if (!isset($run['graded'][$id])) json_error(409, 'Valuta prima la pagina corrente.');
+    }
+    if (count($run['served']) >= $run['cfg']['qcount']) {
+        echo json_encode(['batch' => []]);
+        exit;
+    }
+}
+
+$mode = $run['cfg']['mode'];
+$spec = $run['cfg']['spec'];
+$excluded = $run['cfg']['excluded'];
+$answerType = $run['cfg']['answerType'];
+$selectedRanges = $run['cfg']['selectedRanges'];
+$currentLevel = $run['level'];
+$seenIds = array_keys($run['served']);
 
 $RANGES = [
     'facile'    => [5, 25],
@@ -178,5 +207,13 @@ foreach ($out as $q) {
 }
 
 shuffle($batch);
+
+if (empty($batch)) {
+    $run['exhausted'] = true;
+} else {
+    foreach ($batch as $q) $run['served'][$q['_id']] = $q['difficolta'];
+    $run['pages'][] = array_column($batch, '_id');
+}
+run_put($run);
 
 echo json_encode(['batch' => $batch], JSON_UNESCAPED_UNICODE);

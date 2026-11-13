@@ -9,6 +9,11 @@ RedirectMatch 403 /\.
     Require all denied
 </FilesMatch>
 
+# Dataset con le risposte, classifica grezza e file interni: solo via API
+<FilesMatch "^(materie|leaderboard)\.json$|^_.*\.php$">
+    Require all denied
+</FilesMatch>
+
 # Default charset
 AddDefaultCharset UTF-8
 
